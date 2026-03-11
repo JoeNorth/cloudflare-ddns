@@ -802,6 +802,16 @@ pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
         inner.warningf("", "Cloudflare IP rejection: DISABLED (REJECT_CLOUDFLARE_IPS=false)");
     }
 
+    if config.docker_label_enabled {
+        match &config.docker_socket {
+            Some(path) => inner.noticef(
+                pp::EMOJI_DOCKER,
+                &format!("Docker label discovery: enabled (socket: {path})"),
+            ),
+            None => inner.noticef(pp::EMOJI_DOCKER, "Docker label discovery: enabled"),
+        }
+    }
+
     if let Some(ref comment) = config.record_comment {
         inner.infof("", &format!("Record comment: {comment}"));
     }
