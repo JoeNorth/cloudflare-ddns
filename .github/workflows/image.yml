@@ -1,15 +1,23 @@
 name: Build cloudflare-ddns Docker image (multi-arch)
 
 on:
+  dispatch_workflow:
   push:
     branches: master
     tags:
       - "v*"
   pull_request:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/cloudflare-ddns
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -24,8 +32,9 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract version from Cargo.toml
         id: version
@@ -37,12 +46,13 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: JoeNorth/cloudflare-ddns
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,enable=${{ github.ref == 'refs/heads/master' }},value=latest
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=sha
             type=raw,enable=${{ github.ref == 'refs/heads/master' }},value=${{ steps.version.outputs.version }}
 
       - name: Build and push
@@ -51,7 +61,7 @@ jobs:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          platforms: linux/amd64,linux/arm64,linux/ppc64le
+          platforms: linux/amd64,linux/arm64
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.html_url }}
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
