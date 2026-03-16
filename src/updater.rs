@@ -106,7 +106,7 @@ pub async fn update_once<B: DnsBackend>(
 
                 match result {
                     SetResult::Updated => {
-                        notify = true;            // NEW
+                        notify = true; // NEW
                         let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
                         messages.push(Message::new_ok(&format!(
                             "Updated {domain_str} -> {}",
@@ -114,11 +114,9 @@ pub async fn update_once<B: DnsBackend>(
                         )));
                     }
                     SetResult::Failed => {
-                        notify = true;            // NEW
+                        notify = true; // NEW
                         all_ok = false;
-                        messages.push(Message::new_fail(&format!(
-                            "Failed to update {domain_str}"
-                        )));
+                        messages.push(Message::new_fail(&format!("Failed to update {domain_str}")));
                     }
                     SetResult::Noop => {}
                 }
@@ -127,8 +125,7 @@ pub async fn update_once<B: DnsBackend>(
 
         // Update Proxmox-discovered domains (each VM has its own IP)
         if let Some(ref pve_config) = config.proxmox_config {
-            let pve_entries =
-                crate::proxmox::discover_proxmox_domains(pve_config, ppfmt).await;
+            let pve_entries = crate::proxmox::discover_proxmox_domains(pve_config, ppfmt).await;
             for entry in &pve_entries {
                 let proxied = config
                     .proxied_expression
@@ -169,7 +166,6 @@ pub async fn update_once<B: DnsBackend>(
                 }
             }
         }
-
     }
 
     // Send heartbeat ONLY if something meaningful happened
@@ -261,14 +257,15 @@ pub async fn final_delete<B: DnsBackend>(
 
         for domain_str in domains {
             handle.final_delete(domain_str, record_type, ppfmt).await;
-            messages.push(Message::new_ok(&format!("Deleted records for {domain_str}")));
+            messages.push(Message::new_ok(&format!(
+                "Deleted records for {domain_str}"
+            )));
         }
     }
 
     // Delete Proxmox-discovered domain records
     if let Some(ref pve_config) = config.proxmox_config {
-        let pve_entries =
-            crate::proxmox::discover_proxmox_domains(pve_config, ppfmt).await;
+        let pve_entries = crate::proxmox::discover_proxmox_domains(pve_config, ppfmt).await;
         for entry in &pve_entries {
             handle.final_delete(&entry.domain, "A", ppfmt).await;
             messages.push(Message::new_ok(&format!(
@@ -564,9 +561,9 @@ impl LegacyDdnsClient {
                 "zones/{}/dns_records?per_page=100&type={record_type}",
                 entry.zone_id
             );
-            let answer: Option<LegacyCfResponse<Vec<LegacyDnsRecord>>> =
-                self.cf_api(&endpoint, "GET", entry, None::<&()>.as_ref())
-                    .await;
+            let answer: Option<LegacyCfResponse<Vec<LegacyDnsRecord>>> = self
+                .cf_api(&endpoint, "GET", entry, None::<&()>.as_ref())
+                .await;
 
             if let Some(resp) = answer {
                 if let Some(records) = resp.result {
@@ -575,10 +572,8 @@ impl LegacyDdnsClient {
                             println!("[DRY RUN] Would delete stale record {}", record.id);
                             continue;
                         }
-                        let del_endpoint = format!(
-                            "zones/{}/dns_records/{}",
-                            entry.zone_id, record.id
-                        );
+                        let del_endpoint =
+                            format!("zones/{}/dns_records/{}", entry.zone_id, record.id);
                         let _: Option<serde_json::Value> = self
                             .cf_api(&del_endpoint, "DELETE", entry, None::<&()>.as_ref())
                             .await;
@@ -653,9 +648,9 @@ impl LegacyDdnsClient {
                     "zones/{}/dns_records?per_page=100&type={}",
                     entry.zone_id, ip.record_type
                 );
-                let dns_records: Option<LegacyCfResponse<Vec<LegacyDnsRecord>>> =
-                    self.cf_api(&dns_endpoint, "GET", entry, None::<&()>.as_ref())
-                        .await;
+                let dns_records: Option<LegacyCfResponse<Vec<LegacyDnsRecord>>> = self
+                    .cf_api(&dns_endpoint, "GET", entry, None::<&()>.as_ref())
+                    .await;
 
                 let mut identifier: Option<String> = None;
                 let mut modified = false;
@@ -674,9 +669,7 @@ impl LegacyDdnsClient {
                                     }
                                 } else {
                                     identifier = Some(r.id.clone());
-                                    if r.content != record.content
-                                        || r.proxied != record.proxied
-                                    {
+                                    if r.content != record.content || r.proxied != record.proxied {
                                         modified = true;
                                     }
                                 }
@@ -893,8 +886,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/zones/{zone_id}/dns_records")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(dns_record_created("rec-1", domain, ip)),
+                ResponseTemplate::new(200).set_body_json(dns_record_created("rec-1", domain, ip)),
             )
             .mount(&server)
             .await;
@@ -941,8 +933,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(format!("/zones/{zone_id}/dns_records")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(dns_records_one("rec-1", domain, ip)),
+                ResponseTemplate::new(200).set_body_json(dns_records_one("rec-1", domain, ip)),
             )
             .mount(&server)
             .await;
@@ -1024,9 +1015,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/zones"))
             .and(query_param("name", domain))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(zones_empty_response()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(zones_empty_response()))
             .mount(&server)
             .await;
 
@@ -1034,9 +1023,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/zones"))
             .and(query_param("name", "example.com"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(zones_empty_response()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(zones_empty_response()))
             .mount(&server)
             .await;
 
@@ -1122,8 +1109,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/accounts/{account_id}/rules/lists")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_lists_response(list_id, list_name)),
+                ResponseTemplate::new(200).set_body_json(waf_lists_response(list_id, list_name)),
             )
             .mount(&server)
             .await;
@@ -1134,8 +1120,7 @@ mod tests {
                 "/accounts/{account_id}/rules/lists/{list_id}/items"
             )))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_items_response(serde_json::json!([]))),
+                ResponseTemplate::new(200).set_body_json(waf_items_response(serde_json::json!([]))),
             )
             .mount(&server)
             .await;
@@ -1186,8 +1171,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/accounts/{account_id}/rules/lists")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_lists_response(list_id, list_name)),
+                ResponseTemplate::new(200).set_body_json(waf_lists_response(list_id, list_name)),
             )
             .mount(&server)
             .await;
@@ -1197,8 +1181,7 @@ mod tests {
                 "/accounts/{account_id}/rules/lists/{list_id}/items"
             )))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_items_response(serde_json::json!([]))),
+                ResponseTemplate::new(200).set_body_json(waf_items_response(serde_json::json!([]))),
             )
             .mount(&server)
             .await;
@@ -1217,7 +1200,12 @@ mod tests {
             list_name: list_name.to_string(),
         };
 
-        let config = make_config(providers, HashMap::new(), vec![waf_list], true /* dry_run */);
+        let config = make_config(
+            providers,
+            HashMap::new(),
+            vec![waf_list],
+            true, /* dry_run */
+        );
         let cf = handle(&server.uri());
         let notifier = empty_notifier();
         let heartbeat = empty_heartbeat();
@@ -1385,8 +1373,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(format!("/zones/{zone_id}/dns_records")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(dns_records_one(record_id, domain, ip)),
+                ResponseTemplate::new(200).set_body_json(dns_records_one(record_id, domain, ip)),
             )
             .mount(&server)
             .await;
@@ -1462,18 +1449,14 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/zones"))
             .and(query_param("name", domain))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(zones_empty_response()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(zones_empty_response()))
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
             .and(path("/zones"))
             .and(query_param("name", "example.com"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(zones_empty_response()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(zones_empty_response()))
             .mount(&server)
             .await;
 
@@ -1504,8 +1487,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/accounts/{account_id}/rules/lists")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_lists_response(list_id, list_name)),
+                ResponseTemplate::new(200).set_body_json(waf_lists_response(list_id, list_name)),
             )
             .mount(&server)
             .await;
@@ -1515,11 +1497,11 @@ mod tests {
             .and(path(format!(
                 "/accounts/{account_id}/rules/lists/{list_id}/items"
             )))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(waf_items_response(serde_json::json!([
+            .respond_with(ResponseTemplate::new(200).set_body_json(waf_items_response(
+                serde_json::json!([
                     { "id": item_id, "ip": ip, "comment": null }
-                ]))),
-            )
+                ]),
+            )))
             .mount(&server)
             .await;
 
@@ -1558,8 +1540,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/accounts/{account_id}/rules/lists")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_lists_response(list_id, list_name)),
+                ResponseTemplate::new(200).set_body_json(waf_lists_response(list_id, list_name)),
             )
             .mount(&server)
             .await;
@@ -1570,8 +1551,7 @@ mod tests {
                 "/accounts/{account_id}/rules/lists/{list_id}/items"
             )))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_items_response(serde_json::json!([]))),
+                ResponseTemplate::new(200).set_body_json(waf_items_response(serde_json::json!([]))),
             )
             .mount(&server)
             .await;
@@ -1619,8 +1599,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(format!("/zones/{zone_id}/dns_records")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(dns_records_one(record_id, domain, ip)),
+                ResponseTemplate::new(200).set_body_json(dns_records_one(record_id, domain, ip)),
             )
             .mount(&server)
             .await;
@@ -1639,8 +1618,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/accounts/{account_id}/rules/lists")))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(waf_lists_response(list_id, list_name)),
+                ResponseTemplate::new(200).set_body_json(waf_lists_response(list_id, list_name)),
             )
             .mount(&server)
             .await;
@@ -1650,11 +1628,11 @@ mod tests {
             .and(path(format!(
                 "/accounts/{account_id}/rules/lists/{list_id}/items"
             )))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(waf_items_response(serde_json::json!([
+            .respond_with(ResponseTemplate::new(200).set_body_json(waf_items_response(
+                serde_json::json!([
                     { "id": item_id, "ip": ip, "comment": null }
-                ]))),
-            )
+                ]),
+            )))
             .mount(&server)
             .await;
 
@@ -1752,8 +1730,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/trace"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("fl=1\nh=mock\nip=198.51.100.1\nts=0\n"),
+                ResponseTemplate::new(200).set_body_string("fl=1\nh=mock\nip=198.51.100.1\nts=0\n"),
             )
             .mount(&server)
             .await;
@@ -1768,7 +1745,13 @@ mod tests {
         let mut shown_primary = false;
         let mut shown_secondary = false;
         let result = ddns
-            .try_trace_urls(&ddns.ipv4_urls, &mut shown_primary, &mut shown_secondary, "IPv4", true)
+            .try_trace_urls(
+                &ddns.ipv4_urls,
+                &mut shown_primary,
+                &mut shown_secondary,
+                "IPv4",
+                true,
+            )
             .await;
         assert_eq!(result, Some("198.51.100.1".to_string()));
     }
@@ -1779,8 +1762,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/fallback"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("fl=1\nh=mock\nip=198.51.100.2\nts=0\n"),
+                ResponseTemplate::new(200).set_body_string("fl=1\nh=mock\nip=198.51.100.2\nts=0\n"),
             )
             .mount(&server)
             .await;
@@ -1798,7 +1780,13 @@ mod tests {
         let mut shown_primary = false;
         let mut shown_secondary = false;
         let result = ddns
-            .try_trace_urls(&ddns.ipv4_urls, &mut shown_primary, &mut shown_secondary, "IPv4", true)
+            .try_trace_urls(
+                &ddns.ipv4_urls,
+                &mut shown_primary,
+                &mut shown_secondary,
+                "IPv4",
+                true,
+            )
             .await;
         assert_eq!(result, Some("198.51.100.2".to_string()));
         assert!(shown_primary);
@@ -1807,7 +1795,10 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_try_trace_urls_all_fail() {
         let ddns = LegacyDdnsClient {
-            client: Client::builder().timeout(Duration::from_millis(100)).build().unwrap(),
+            client: Client::builder()
+                .timeout(Duration::from_millis(100))
+                .build()
+                .unwrap(),
             cf_api_base: String::new(),
             ipv4_urls: vec![
                 "http://127.0.0.1:1/fail1".to_string(),
@@ -1819,7 +1810,13 @@ mod tests {
         let mut shown_primary = false;
         let mut shown_secondary = false;
         let result = ddns
-            .try_trace_urls(&ddns.ipv4_urls, &mut shown_primary, &mut shown_secondary, "IPv4", true)
+            .try_trace_urls(
+                &ddns.ipv4_urls,
+                &mut shown_primary,
+                &mut shown_secondary,
+                "IPv4",
+                true,
+            )
             .await;
         assert!(result.is_none());
         assert!(shown_primary);
@@ -1988,10 +1985,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/trace"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("ip=198.51.100.42\n"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("ip=198.51.100.42\n"))
             .mount(&server)
             .await;
 
@@ -2004,7 +1998,9 @@ mod tests {
         };
         let mut warnings = LegacyWarningState::default();
         let config: Vec<crate::config::LegacyCloudflareEntry> = vec![];
-        let ips = ddns.get_ips(true, false, false, &config, &mut warnings).await;
+        let ips = ddns
+            .get_ips(true, false, false, &config, &mut warnings)
+            .await;
         assert!(ips.contains_key("ipv4"));
         assert_eq!(ips["ipv4"].ip, "198.51.100.42");
         assert_eq!(ips["ipv4"].record_type, "A");
@@ -2015,10 +2011,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/trace6"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("ip=2001:db8::1\n"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("ip=2001:db8::1\n"))
             .mount(&server)
             .await;
 
@@ -2031,7 +2024,9 @@ mod tests {
         };
         let mut warnings = LegacyWarningState::default();
         let config: Vec<crate::config::LegacyCloudflareEntry> = vec![];
-        let ips = ddns.get_ips(false, true, false, &config, &mut warnings).await;
+        let ips = ddns
+            .get_ips(false, true, false, &config, &mut warnings)
+            .await;
         assert!(ips.contains_key("ipv6"));
         assert_eq!(ips["ipv6"].ip, "2001:db8::1");
         assert_eq!(ips["ipv6"].record_type, "AAAA");
@@ -2048,7 +2043,9 @@ mod tests {
         };
         let mut warnings = LegacyWarningState::default();
         let config: Vec<crate::config::LegacyCloudflareEntry> = vec![];
-        let ips = ddns.get_ips(false, false, false, &config, &mut warnings).await;
+        let ips = ddns
+            .get_ips(false, false, false, &config, &mut warnings)
+            .await;
         assert!(ips.is_empty());
     }
 
@@ -2356,10 +2353,13 @@ mod tests {
             dry_run: false,
         };
         let mut ips = HashMap::new();
-        ips.insert("ipv4".to_string(), LegacyIpInfo {
-            record_type: "A".to_string(),
-            ip: "198.51.100.1".to_string(),
-        });
+        ips.insert(
+            "ipv4".to_string(),
+            LegacyIpInfo {
+                record_type: "A".to_string(),
+                ip: "198.51.100.1".to_string(),
+            },
+        );
         let config = vec![crate::config::LegacyCloudflareEntry {
             authentication: crate::config::LegacyAuthentication {
                 api_token: "test-token".to_string(),
@@ -2495,7 +2495,14 @@ mod tests {
         extra.insert(IpType::V4, vec!["b.com".to_string(), "c.com".to_string()]);
         let result = super::merge_domains(&base, &extra);
         let v4 = result.get(&IpType::V4).unwrap();
-        assert_eq!(v4, &vec!["a.com".to_string(), "b.com".to_string(), "c.com".to_string()]);
+        assert_eq!(
+            v4,
+            &vec![
+                "a.com".to_string(),
+                "b.com".to_string(),
+                "c.com".to_string()
+            ]
+        );
     }
 
     #[test]
