@@ -18,6 +18,16 @@ pub struct ProxmoxEntry {
 }
 
 /// Configuration for connecting to the Proxmox API.
+///
+/// The API token must have the following minimum read-only privileges:
+///
+/// | Path   | Privilege                          |
+/// |--------|------------------------------------|
+/// | `/`    | `Sys.Audit`                        |
+/// | `/vms` | `VM.Audit`, `VM.Monitor`           |
+///
+/// On Proxmox VE 9.x+, use `VM.GuestAgent` instead of `VM.Monitor` for the guest agent
+/// query — it is more narrowly scoped and does not grant full QEMU monitor access.
 #[derive(Debug, Clone)]
 pub struct ProxmoxConfig {
     pub api_url: String,
