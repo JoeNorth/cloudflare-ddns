@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to rebuild (e.g. v1.0.0)"
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -26,6 +32,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -85,6 +93,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -109,18 +119,33 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Determine effective tag
+        id: effective-tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GIT_REF: ${{ github.ref }}
+        run: |
+          TAG="${INPUT_TAG:-${GIT_REF#refs/tags/}}"
+          VERSION="${TAG#v}"
+          MAJOR="${VERSION%%.*}"
+          MINOR="${VERSION#*.}" && MINOR="${MINOR%%.*}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,enable=${{ github.ref == 'refs/heads/master' }},value=latest
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=latest
+            type=raw,value=${{ steps.effective-tag.outputs.version }}
+            type=raw,value=${{ steps.effective-tag.outputs.major_minor }}
+            type=raw,value=${{ steps.effective-tag.outputs.major }}
             type=sha
-            type=raw,enable=${{ github.ref == 'refs/heads/master' }},value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.version }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
