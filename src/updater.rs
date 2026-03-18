@@ -1,4 +1,5 @@
 use crate::backend::{DnsBackend, SetResult, Ttl};
+use crate::cf_ip_filter::CloudflareIpFilter;
 use crate::cloudflare::CloudflareHandle;
 use crate::config::{AppConfig, LegacyCloudflareEntry, LegacySubdomainEntry};
 use crate::domain::make_fqdn;
@@ -75,6 +76,49 @@ pub async fn update_once<B: DnsBackend>(
         } else {
             config.domains.clone()
         };
+
+        // Filter out Cloudflare IPs if enabled
+        if config.reject_cloudflare_ips {
+            if let Some(cf_filter) =
+                CloudflareIpFilter::fetch(&detection_client, config.detection_timeout, ppfmt).await
+            {
+                for (ip_type, ips) in detected_ips.iter_mut() {
+                    let before_count = ips.len();
+                    ips.retain(|ip| {
+                        if cf_filter.contains(ip) {
+                            ppfmt.warningf(
+                                pp::EMOJI_WARNING,
+                                &format!(
+                                    "Rejected {ip}: matches Cloudflare IP range ({})",
+                                    ip_type.describe()
+                                ),
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    if ips.is_empty() && before_count > 0 {
+                        ppfmt.warningf(
+                            pp::EMOJI_WARNING,
+                            &format!(
+                                "All detected {} addresses were Cloudflare IPs; skipping updates for this type",
+                                ip_type.describe()
+                            ),
+                        );
+                        messages.push(Message::new_fail(&format!(
+                            "All {} addresses rejected (Cloudflare IPs)",
+                            ip_type.describe()
+                        )));
+                    }
+                }
+            } else {
+                ppfmt.warningf(
+                    pp::EMOJI_WARNING,
+                    "Could not fetch Cloudflare IP ranges; skipping filter",
+                );
+            }
+        }
 
         // Update DNS records (env var mode - domain-based)
         for (ip_type, domains) in &effective_domains {
@@ -778,6 +822,7 @@ mod tests {
             managed_waf_comment_regex: None,
             detection_timeout: Duration::from_secs(5),
             update_timeout: Duration::from_secs(5),
+            reject_cloudflare_ips: false,
             dry_run,
             emoji: false,
             quiet: true,

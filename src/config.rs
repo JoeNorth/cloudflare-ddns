@@ -98,6 +98,7 @@ pub struct AppConfig {
     pub managed_waf_comment_regex: Option<regex::Regex>,
     pub detection_timeout: Duration,
     pub update_timeout: Duration,
+    pub reject_cloudflare_ips: bool,
     pub dry_run: bool,
     pub emoji: bool,
     pub quiet: bool,
@@ -473,6 +474,7 @@ fn legacy_to_app_config(legacy: LegacyConfig, dry_run: bool, repeat: bool) -> Ap
         managed_waf_comment_regex: None,
         detection_timeout: Duration::from_secs(5),
         update_timeout: Duration::from_secs(30),
+        reject_cloudflare_ips: false,
         dry_run,
         emoji: false,
         quiet: false,
@@ -574,6 +576,7 @@ pub fn load_env_config(ppfmt: &PP) -> Result<AppConfig, String> {
 
     let emoji = getenv_bool("EMOJI", true);
     let quiet = getenv_bool("QUIET", false);
+    let reject_cloudflare_ips = getenv_bool("REJECT_CLOUDFLARE_IPS", false);
 
     let docker_label_enabled = getenv_bool("DOCKER_LABEL_ENABLED", false);
     let docker_socket = getenv("DOCKER_SOCKET");
@@ -651,6 +654,7 @@ pub fn load_env_config(ppfmt: &PP) -> Result<AppConfig, String> {
         managed_waf_comment_regex,
         detection_timeout,
         update_timeout,
+        reject_cloudflare_ips,
         dry_run: false, // Set later from CLI args
         emoji,
         quiet,
@@ -774,6 +778,10 @@ pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
                 pve.tag
             ),
         );
+    }
+
+    if config.reject_cloudflare_ips {
+        inner.infof("", "Reject Cloudflare IPs: enabled");
     }
 
     if let Some(ref comment) = config.record_comment {
@@ -1308,6 +1316,7 @@ mod tests {
             managed_waf_comment_regex: None,
             detection_timeout: Duration::from_secs(5),
             update_timeout: Duration::from_secs(30),
+            reject_cloudflare_ips: false,
             dry_run: false,
             emoji: false,
             quiet: false,
@@ -1347,6 +1356,7 @@ mod tests {
             managed_waf_comment_regex: None,
             detection_timeout: Duration::from_secs(5),
             update_timeout: Duration::from_secs(30),
+            reject_cloudflare_ips: false,
             dry_run: false,
             emoji: false,
             quiet: false,
@@ -2011,6 +2021,7 @@ mod tests {
             managed_waf_comment_regex: None,
             detection_timeout: Duration::from_secs(5),
             update_timeout: Duration::from_secs(30),
+            reject_cloudflare_ips: false,
             dry_run: false,
             emoji: false,
             quiet: false,
@@ -2052,6 +2063,7 @@ mod tests {
             managed_waf_comment_regex: None,
             detection_timeout: Duration::from_secs(5),
             update_timeout: Duration::from_secs(30),
+            reject_cloudflare_ips: false,
             dry_run: false,
             emoji: false,
             quiet: true,
@@ -2090,6 +2102,7 @@ mod tests {
             managed_waf_comment_regex: None,
             detection_timeout: Duration::from_secs(5),
             update_timeout: Duration::from_secs(30),
+            reject_cloudflare_ips: false,
             dry_run: false,
             emoji: false,
             quiet: false,
