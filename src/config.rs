@@ -1,4 +1,5 @@
-use crate::cloudflare::{Auth, TTL, WAFList};
+use crate::backend::Ttl;
+use crate::cloudflare::{Auth, WAFList};
 use crate::domain;
 use crate::notifier::{
     CompositeNotifier, Heartbeat, HeartbeatMonitor, HealthchecksMonitor, NotifierDyn,
@@ -71,16 +72,24 @@ pub struct LegacyApiKey {
 // Unified Config (supports both legacy JSON and env var modes)
 // ============================================================
 
+/// Which DNS backend to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendType {
+    Cloudflare,
+    Technitium,
+}
+
 /// The complete application configuration
 pub struct AppConfig {
-    pub auth: Auth,
+    pub backend: BackendType,
+    pub auth: Option<Auth>,
     pub providers: HashMap<IpType, ProviderType>,
     pub domains: HashMap<IpType, Vec<String>>, // FQDN domains by IP type
     pub waf_lists: Vec<WAFList>,
     pub update_cron: CronSchedule,
     pub update_on_start: bool,
     pub delete_on_stop: bool,
-    pub ttl: TTL,
+    pub ttl: Ttl,
     pub proxied_expression: Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
     pub record_comment: Option<String>,
     pub managed_comment_regex: Option<regex::Regex>,
@@ -97,6 +106,9 @@ pub struct AppConfig {
     pub docker_socket: Option<String>,
     // Proxmox VM discovery
     pub proxmox_config: Option<crate::proxmox::ProxmoxConfig>,
+    // Technitium-specific
+    pub technitium_url: Option<String>,
+    pub technitium_token: Option<String>,
     // Legacy mode fields
     pub legacy_mode: bool,
     pub legacy_config: Option<LegacyConfig>,
@@ -224,6 +236,22 @@ fn read_auth_from_env(ppfmt: &PP) -> Option<Auth> {
         );
     }
 
+    None
+}
+
+/// Read a token from an env var or from a file pointed to by a companion _FILE env var.
+fn read_token_or_file(token_var: &str, file_var: &str) -> Option<String> {
+    if let Some(token) = getenv(token_var) {
+        return Some(token);
+    }
+    if let Some(path) = getenv(file_var) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let token = content.trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+    }
     None
 }
 
@@ -419,7 +447,7 @@ fn legacy_to_app_config(legacy: LegacyConfig, dry_run: bool, repeat: bool) -> Ap
         providers.insert(IpType::V6, ProviderType::CloudflareTrace { url: None });
     }
 
-    let ttl = TTL::new(legacy.ttl);
+    let ttl = Ttl(legacy.ttl.max(1) as u32);
     let schedule = if repeat {
         // Use TTL as interval in legacy mode
         CronSchedule::Every(Duration::from_secs(legacy.ttl.max(1) as u64))
@@ -428,7 +456,8 @@ fn legacy_to_app_config(legacy: LegacyConfig, dry_run: bool, repeat: bool) -> Ap
     };
 
     AppConfig {
-        auth,
+        backend: BackendType::Cloudflare,
+        auth: Some(auth),
         providers,
         domains: HashMap::new(),
         waf_lists: Vec::new(),
@@ -450,6 +479,8 @@ fn legacy_to_app_config(legacy: LegacyConfig, dry_run: bool, repeat: bool) -> Ap
         docker_label_enabled: false,
         docker_socket: None,
         proxmox_config: None,
+        technitium_url: None,
+        technitium_token: None,
         legacy_mode: true,
         legacy_config: Some(legacy),
         repeat,
@@ -470,6 +501,9 @@ pub fn is_env_config_mode() -> bool {
         || getenv("DOMAINS").is_some()
         || getenv("IP4_DOMAINS").is_some()
         || getenv("IP6_DOMAINS").is_some()
+        || getenv("TECHNITIUM_URL").is_some()
+        || getenv("TECHNITIUM_TOKEN").is_some()
+        || getenv("BACKEND").is_some()
 }
 
 /// Load configuration from environment variables (cf-ddns mode).
@@ -482,20 +516,43 @@ pub fn load_env_config(ppfmt: &PP) -> Result<AppConfig, String> {
         ppfmt.warningf(pp::EMOJI_WARNING, "PGID is deprecated since v1.13.0 and ignored. Use Docker's built-in mechanism instead.");
     }
 
-    let auth = read_auth_from_env(ppfmt)
-        .ok_or_else(|| "No authentication configured. Set CLOUDFLARE_API_TOKEN.".to_string())?;
+    // Determine backend
+    let backend = match getenv("BACKEND").as_deref() {
+        Some("technitium") => BackendType::Technitium,
+        Some("cloudflare") | None => BackendType::Cloudflare,
+        Some(other) => return Err(format!("Unknown BACKEND: {other}. Valid values: cloudflare, technitium")),
+    };
+
+    // Auth + backend-specific config
+    let (auth, technitium_url, technitium_token) = match backend {
+        BackendType::Cloudflare => {
+            let a = read_auth_from_env(ppfmt)
+                .ok_or_else(|| "No authentication configured. Set CLOUDFLARE_API_TOKEN.".to_string())?;
+            (Some(a), None, None)
+        }
+        BackendType::Technitium => {
+            let url = getenv("TECHNITIUM_URL")
+                .ok_or_else(|| "BACKEND=technitium requires TECHNITIUM_URL to be set.".to_string())?;
+            let token = read_token_or_file("TECHNITIUM_TOKEN", "TECHNITIUM_TOKEN_FILE")
+                .ok_or_else(|| "BACKEND=technitium requires TECHNITIUM_TOKEN or TECHNITIUM_TOKEN_FILE to be set.".to_string())?;
+            (None, Some(url), Some(token))
+        }
+    };
 
     let providers = read_providers_from_env(ppfmt)?;
     let domains = read_domains_from_env(ppfmt);
-    let waf_lists = read_waf_lists_from_env(ppfmt);
+    let waf_lists = if backend == BackendType::Cloudflare {
+        read_waf_lists_from_env(ppfmt)
+    } else {
+        Vec::new()
+    };
     let update_cron = read_cron_from_env(ppfmt)?;
     let update_on_start = getenv_bool("UPDATE_ON_START", true);
     let delete_on_stop = getenv_bool("DELETE_ON_STOP", false);
 
-    let ttl_val = getenv("TTL")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(1);
-    let ttl = TTL::new(ttl_val);
+    let ttl = Ttl(getenv("TTL")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1));
 
     let proxied_expr_str = getenv("PROXIED").unwrap_or_else(|| "false".to_string());
     let proxied_expression = match domain::parse_proxied_expression(&proxied_expr_str) {
@@ -577,6 +634,7 @@ pub fn load_env_config(ppfmt: &PP) -> Result<AppConfig, String> {
     }
 
     Ok(AppConfig {
+        backend,
         auth,
         providers,
         domains,
@@ -599,6 +657,8 @@ pub fn load_env_config(ppfmt: &PP) -> Result<AppConfig, String> {
         docker_label_enabled,
         docker_socket,
         proxmox_config,
+        technitium_url,
+        technitium_token,
         legacy_mode: false,
         legacy_config: None,
         repeat: false, // Set later
@@ -689,7 +749,7 @@ pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
         inner.infof("", &format!("{} provider: {}", ip_type.describe(), provider.name()));
     }
 
-    inner.infof("", &format!("TTL: {}", config.ttl.describe()));
+    inner.infof("", &format!("TTL: {}", crate::cloudflare::describe_ttl(config.ttl)));
     inner.infof("", &format!("Schedule: {}", config.update_cron.describe()));
 
     if config.delete_on_stop {
@@ -1047,7 +1107,7 @@ mod tests {
         };
         let config = legacy_to_app_config(legacy, false, false);
         assert!(config.legacy_mode);
-        assert!(matches!(config.auth, Auth::Token(ref t) if t == "my-token"));
+        assert!(matches!(config.auth, Some(Auth::Token(ref t)) if t == "my-token"));
         assert!(config.providers.contains_key(&IpType::V4));
         assert!(!config.providers.contains_key(&IpType::V6));
         assert!(matches!(config.update_cron, CronSchedule::Once));
@@ -1098,7 +1158,7 @@ mod tests {
             ttl: 300,
         };
         let config = legacy_to_app_config(legacy, false, false);
-        assert!(matches!(config.auth, Auth::Key { ref api_key, ref email }
+        assert!(matches!(config.auth, Some(Auth::Key { ref api_key, ref email })
             if api_key == "key123" && email == "test@example.com"));
     }
 
@@ -1231,14 +1291,15 @@ mod tests {
     #[test]
     fn test_print_config_summary_legacy_noop() {
         let config = AppConfig {
-            auth: Auth::Token(String::new()),
+            backend: BackendType::Cloudflare,
+            auth: Some(Auth::Token(String::new())),
             providers: HashMap::new(),
             domains: HashMap::new(),
             waf_lists: Vec::new(),
             update_cron: CronSchedule::Once,
             update_on_start: true,
             delete_on_stop: false,
-            ttl: TTL::AUTO,
+            ttl: Ttl(1),
             proxied_expression: None,
             record_comment: None,
             managed_comment_regex: None,
@@ -1253,6 +1314,8 @@ mod tests {
             docker_label_enabled: false,
             docker_socket: None,
             proxmox_config: None,
+            technitium_url: None,
+            technitium_token: None,
             legacy_mode: true,
             legacy_config: None,
             repeat: false,
@@ -1267,14 +1330,15 @@ mod tests {
         let mut domains = HashMap::new();
         domains.insert(IpType::V4, vec!["example.com".to_string()]);
         let config = AppConfig {
-            auth: Auth::Token("tok".to_string()),
+            backend: BackendType::Cloudflare,
+            auth: Some(Auth::Token("tok".to_string())),
             providers: HashMap::new(),
             domains,
             waf_lists: Vec::new(),
             update_cron: CronSchedule::Every(Duration::from_secs(300)),
             update_on_start: true,
             delete_on_stop: true,
-            ttl: TTL::new(60),
+            ttl: Ttl(60),
             proxied_expression: None,
             record_comment: Some("managed".to_string()),
             managed_comment_regex: None,
@@ -1289,6 +1353,8 @@ mod tests {
             docker_label_enabled: false,
             docker_socket: None,
             proxmox_config: None,
+            technitium_url: None,
+            technitium_token: None,
             legacy_mode: false,
             legacy_config: None,
             repeat: false,
@@ -1622,7 +1688,7 @@ mod tests {
         let pp = PP::new(false, true);
         let config = load_env_config(&pp).unwrap();
         drop(g);
-        assert!(matches!(config.auth, Auth::Token(ref t) if t == "tok-load-test"));
+        assert!(matches!(config.auth, Some(Auth::Token(ref t)) if t == "tok-load-test"));
         assert!(!config.domains.is_empty());
         assert!(!config.legacy_mode);
     }
@@ -1928,14 +1994,15 @@ mod tests {
             list_name: "my_list".to_string(),
         };
         let config = AppConfig {
-            auth: Auth::Token("tok".to_string()),
+            backend: BackendType::Cloudflare,
+            auth: Some(Auth::Token("tok".to_string())),
             providers: HashMap::new(),
             domains: HashMap::new(),
             waf_lists: vec![waf_list],
             update_cron: CronSchedule::Every(Duration::from_secs(300)),
             update_on_start: true,
             delete_on_stop: false,
-            ttl: TTL::AUTO,
+            ttl: Ttl(1),
             proxied_expression: None,
             record_comment: None,
             managed_comment_regex: None,
@@ -1950,6 +2017,8 @@ mod tests {
             docker_label_enabled: false,
             docker_socket: None,
             proxmox_config: None,
+            technitium_url: None,
+            technitium_token: None,
             legacy_mode: false,
             legacy_config: None,
             repeat: false,
@@ -1966,14 +2035,15 @@ mod tests {
         let mut domains = HashMap::new();
         domains.insert(IpType::V4, vec!["v4.example.com".to_string()]);
         let config = AppConfig {
-            auth: Auth::Token("tok".to_string()),
+            backend: BackendType::Cloudflare,
+            auth: Some(Auth::Token("tok".to_string())),
             providers,
             domains,
             waf_lists: Vec::new(),
             update_cron: CronSchedule::Every(Duration::from_secs(600)),
             update_on_start: true,
             delete_on_stop: true,
-            ttl: TTL::new(120),
+            ttl: Ttl(120),
             proxied_expression: None,
             record_comment: Some("cf-ddns".to_string()),
             managed_comment_regex: None,
@@ -1988,6 +2058,8 @@ mod tests {
             docker_label_enabled: false,
             docker_socket: None,
             proxmox_config: None,
+            technitium_url: None,
+            technitium_token: None,
             legacy_mode: false,
             legacy_config: None,
             repeat: true,
@@ -2001,14 +2073,15 @@ mod tests {
         let mut domains = HashMap::new();
         domains.insert(IpType::V6, vec!["ipv6.example.com".to_string()]);
         let config = AppConfig {
-            auth: Auth::Token("tok".to_string()),
+            backend: BackendType::Cloudflare,
+            auth: Some(Auth::Token("tok".to_string())),
             providers: HashMap::new(),
             domains,
             waf_lists: Vec::new(),
             update_cron: CronSchedule::Once,
             update_on_start: true,
             delete_on_stop: false,
-            ttl: TTL::AUTO,
+            ttl: Ttl(1),
             proxied_expression: None,
             record_comment: None,
             managed_comment_regex: None,
@@ -2023,6 +2096,8 @@ mod tests {
             docker_label_enabled: false,
             docker_socket: None,
             proxmox_config: None,
+            technitium_url: None,
+            technitium_token: None,
             legacy_mode: false,
             legacy_config: None,
             repeat: false,

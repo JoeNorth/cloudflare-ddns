@@ -1,3 +1,4 @@
+mod backend;
 mod cloudflare;
 mod config;
 mod docker;
@@ -6,12 +7,15 @@ mod notifier;
 mod pp;
 mod provider;
 mod proxmox;
+mod technitium;
 mod updater;
 
+use crate::backend::DnsBackend;
 use crate::cloudflare::{Auth, CloudflareHandle};
-use crate::config::{AppConfig, CronSchedule};
+use crate::config::{AppConfig, BackendType, CronSchedule};
 use crate::notifier::{CompositeNotifier, Heartbeat, Message};
 use crate::pp::PP;
+use crate::technitium::TechnitiumHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::signal;
@@ -87,24 +91,6 @@ async fn main() {
     let notifier = config::setup_notifiers(&ppfmt);
     let heartbeat = config::setup_heartbeats(&ppfmt);
 
-    // Create Cloudflare handle (for env mode)
-    let handle = if !app_config.legacy_mode {
-        CloudflareHandle::new(
-            app_config.auth.clone(),
-            app_config.update_timeout,
-            app_config.managed_comment_regex.clone(),
-            app_config.managed_waf_comment_regex.clone(),
-        )
-    } else {
-        // Create a dummy handle for legacy mode (won't be used)
-        CloudflareHandle::new(
-            Auth::Token(String::new()),
-            Duration::from_secs(30),
-            None,
-            None,
-        )
-    };
-
     // Signal handler for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -117,18 +103,47 @@ async fn main() {
     // Start heartbeat
     heartbeat.start().await;
 
-    if app_config.legacy_mode {
-        // --- Legacy mode (original cloudflare-ddns behavior) ---
-        run_legacy_mode(&app_config, &handle, &notifier, &heartbeat, &ppfmt, running).await;
-    } else {
-        // --- Env var mode (cf-ddns behavior) ---
-        run_env_mode(&app_config, &handle, &notifier, &heartbeat, &ppfmt, running).await;
-    }
+    // Dispatch based on backend type
+    match app_config.backend {
+        BackendType::Cloudflare => {
+            let auth = app_config.auth.clone().unwrap_or_else(|| Auth::Token(String::new()));
+            let handle = CloudflareHandle::new(
+                auth,
+                app_config.update_timeout,
+                app_config.managed_comment_regex.clone(),
+                app_config.managed_waf_comment_regex.clone(),
+            );
 
-    // On shutdown: delete records if configured
-    if app_config.delete_on_stop && !app_config.legacy_mode {
-        ppfmt.noticef(pp::EMOJI_STOP, "Deleting records on stop...");
-        updater::final_delete(&app_config, &handle, &notifier, &heartbeat, &ppfmt).await;
+            if app_config.legacy_mode {
+                run_legacy_mode(&app_config, &handle, &notifier, &heartbeat, &ppfmt, running).await;
+            } else {
+                run_env_mode(&app_config, &handle, Some(&handle), &notifier, &heartbeat, &ppfmt, running).await;
+            }
+
+            if app_config.delete_on_stop && !app_config.legacy_mode {
+                ppfmt.noticef(pp::EMOJI_STOP, "Deleting records on stop...");
+                updater::final_delete(&app_config, &handle, &notifier, &heartbeat, &ppfmt).await;
+                let waf_msgs = updater::final_clear_waf_lists(&app_config, &handle, &ppfmt).await;
+                if !waf_msgs.is_empty() {
+                    let msg = Message::merge(waf_msgs);
+                    notifier.send(&msg).await;
+                }
+            }
+        }
+        BackendType::Technitium => {
+            let handle = TechnitiumHandle::new(
+                app_config.technitium_url.clone().expect("TECHNITIUM_URL required"),
+                app_config.technitium_token.clone().expect("TECHNITIUM_TOKEN required"),
+                app_config.update_timeout,
+            );
+
+            run_env_mode(&app_config, &handle, None, &notifier, &heartbeat, &ppfmt, running).await;
+
+            if app_config.delete_on_stop {
+                ppfmt.noticef(pp::EMOJI_STOP, "Deleting records on stop...");
+                updater::final_delete(&app_config, &handle, &notifier, &heartbeat, &ppfmt).await;
+            }
+        }
     }
 
     // Exit heartbeat
@@ -137,9 +152,9 @@ async fn main() {
         .await;
 }
 
-async fn run_legacy_mode(
+async fn run_legacy_mode<B: DnsBackend>(
     config: &AppConfig,
-    handle: &CloudflareHandle,
+    handle: &B,
     notifier: &CompositeNotifier,
     heartbeat: &Heartbeat,
     ppfmt: &PP,
@@ -180,18 +195,53 @@ async fn run_legacy_mode(
     }
 }
 
-async fn run_env_mode(
+async fn run_env_mode<B: DnsBackend>(
     config: &AppConfig,
-    handle: &CloudflareHandle,
+    handle: &B,
+    waf_handle: Option<&CloudflareHandle>,
     notifier: &CompositeNotifier,
     heartbeat: &Heartbeat,
     ppfmt: &PP,
     running: Arc<AtomicBool>,
 ) {
+    // Helper to run one update cycle + WAF if applicable
+    async fn do_update<B2: DnsBackend>(
+        config: &AppConfig,
+        handle: &B2,
+        waf_handle: Option<&CloudflareHandle>,
+        notifier: &CompositeNotifier,
+        heartbeat: &Heartbeat,
+        ppfmt: &PP,
+    ) {
+        updater::update_once(config, handle, notifier, heartbeat, ppfmt).await;
+
+        // WAF list updates (Cloudflare-only)
+        if let Some(cf_handle) = waf_handle {
+            if !config.waf_lists.is_empty() {
+                // Collect all detected IPs — re-detect for WAF
+                // Since WAF needs all IPs across all types, collect from providers
+                let detection_client = reqwest::Client::builder()
+                    .timeout(config.detection_timeout)
+                    .build()
+                    .unwrap_or_default();
+
+                let mut all_ips = Vec::new();
+                for (ip_type, provider) in &config.providers {
+                    let ips = provider
+                        .detect_ips(&detection_client, *ip_type, config.detection_timeout, ppfmt)
+                        .await;
+                    all_ips.extend(ips);
+                }
+
+                let (_, _waf_msgs) = updater::update_waf_lists(config, cf_handle, &all_ips, ppfmt).await;
+            }
+        }
+    }
+
     match &config.update_cron {
         CronSchedule::Once => {
             if config.update_on_start {
-                updater::update_once(config, handle, notifier, heartbeat, ppfmt).await;
+                do_update(config, handle, waf_handle, notifier, heartbeat, ppfmt).await;
             }
         }
         schedule => {
@@ -207,7 +257,7 @@ async fn run_env_mode(
 
             // Update on start if configured
             if config.update_on_start {
-                updater::update_once(config, handle, notifier, heartbeat, ppfmt).await;
+                do_update(config, handle, waf_handle, notifier, heartbeat, ppfmt).await;
             }
 
             // Main loop
@@ -234,7 +284,7 @@ async fn run_env_mode(
                     return;
                 }
 
-                updater::update_once(config, handle, notifier, heartbeat, ppfmt).await;
+                do_update(config, handle, waf_handle, notifier, heartbeat, ppfmt).await;
             }
         }
     }

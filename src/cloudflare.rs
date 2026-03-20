@@ -1,35 +1,19 @@
+use crate::backend::{DnsBackend, SetResult, Ttl};
 use crate::pp::{self, PP};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::time::Duration;
 
-// --- TTL ---
+/// Cloudflare TTL constant: value 1 means "automatic".
+const TTL_AUTO: Ttl = Ttl(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TTL(pub i64);
-
-impl TTL {
-    pub const AUTO: TTL = TTL(1);
-
-    pub fn new(value: i64) -> Self {
-        if value < 30 {
-            TTL::AUTO
-        } else {
-            TTL(value)
-        }
-    }
-
-    pub fn value(&self) -> i64 {
-        self.0
-    }
-
-    pub fn describe(&self) -> String {
-        if self.0 == 1 {
-            "auto".to_string()
-        } else {
-            format!("{}s", self.0)
-        }
+/// Describe a TTL for display: auto shows "auto", others show "Ns".
+pub fn describe_ttl(ttl: Ttl) -> String {
+    if ttl == TTL_AUTO {
+        "auto".to_string()
+    } else {
+        format!("{}s", ttl.0)
     }
 }
 
@@ -399,15 +383,15 @@ impl CloudflareHandle {
         resp.is_some()
     }
 
-    /// Set IPs for a specific domain/record type. Handles create, update, delete, and dedup.
-    pub async fn set_ips(
+    /// Set IPs for a specific domain/record type within a zone. Handles create, update, delete, and dedup.
+    async fn set_ips_in_zone(
         &self,
         zone_id: &str,
         fqdn: &str,
         record_type: &str,
         ips: &[IpAddr],
         proxied: bool,
-        ttl: TTL,
+        ttl: Ttl,
         comment: Option<&str>,
         dry_run: bool,
         ppfmt: &PP,
@@ -447,7 +431,7 @@ impl CloudflareHandle {
                 used_record_ids.push(&record.id);
                 // Check if update needed (proxied or TTL changed)
                 let needs_update = record.proxied != Some(proxied)
-                    || (ttl != TTL::AUTO && record.ttl != Some(ttl.value()))
+                    || (ttl != TTL_AUTO && record.ttl != Some(ttl.0 as i64))
                     || (comment.is_some() && record.comment.as_deref() != comment);
 
                 if needs_update {
@@ -457,7 +441,7 @@ impl CloudflareHandle {
                         name: fqdn.to_string(),
                         content: ip_str.clone(),
                         proxied,
-                        ttl: ttl.value(),
+                        ttl: ttl.0 as i64,
                         comment: comment.map(|s| s.to_string()),
                     };
                     if dry_run {
@@ -480,7 +464,7 @@ impl CloudflareHandle {
                     name: fqdn.to_string(),
                     content: ip_str.clone(),
                     proxied,
-                    ttl: ttl.value(),
+                    ttl: ttl.0 as i64,
                     comment: comment.map(|s| s.to_string()),
                 };
 
@@ -525,8 +509,8 @@ impl CloudflareHandle {
         }
     }
 
-    /// Delete all managed records for a specific domain/record type.
-    pub async fn final_delete(
+    /// Delete all managed records for a specific domain/record type within a zone.
+    async fn final_delete_in_zone(
         &self,
         zone_id: &str,
         fqdn: &str,
@@ -770,11 +754,48 @@ impl CloudflareHandle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetResult {
-    Noop,
-    Updated,
-    Failed,
+impl DnsBackend for CloudflareHandle {
+    async fn set_ips(
+        &self,
+        fqdn: &str,
+        record_type: &str,
+        ips: &[IpAddr],
+        proxied: bool,
+        ttl: Ttl,
+        comment: Option<&str>,
+        dry_run: bool,
+        ppfmt: &PP,
+    ) -> SetResult {
+        let zone_id = match self.zone_id_of_domain(fqdn, ppfmt).await {
+            Some(id) => id,
+            None => {
+                ppfmt.errorf(
+                    pp::EMOJI_ERROR,
+                    &format!("Could not find zone for domain {fqdn}"),
+                );
+                return SetResult::Failed;
+            }
+        };
+        self.set_ips_in_zone(&zone_id, fqdn, record_type, ips, proxied, ttl, comment, dry_run, ppfmt)
+            .await
+    }
+
+    async fn final_delete(
+        &self,
+        fqdn: &str,
+        record_type: &str,
+        ppfmt: &PP,
+    ) {
+        let zone_id = match self.zone_id_of_domain(fqdn, ppfmt).await {
+            Some(id) => id,
+            None => return,
+        };
+        self.final_delete_in_zone(&zone_id, fqdn, record_type, ppfmt).await;
+    }
+
+    fn backend_name(&self) -> &str {
+        "Cloudflare"
+    }
 }
 
 #[cfg(test)]
@@ -815,35 +836,20 @@ mod tests {
     // -------------------------------------------------------
 
     #[test]
-    fn ttl_new_below_30_becomes_auto() {
-        assert_eq!(TTL::new(0), TTL::AUTO);
-        assert_eq!(TTL::new(1), TTL::AUTO);
-        assert_eq!(TTL::new(29), TTL::AUTO);
-        assert_eq!(TTL::new(-5), TTL::AUTO);
-    }
-
-    #[test]
-    fn ttl_new_at_or_above_30_stays() {
-        assert_eq!(TTL::new(30), TTL(30));
-        assert_eq!(TTL::new(120), TTL(120));
-        assert_eq!(TTL::new(86400), TTL(86400));
-    }
-
-    #[test]
     fn ttl_auto_constant() {
-        assert_eq!(TTL::AUTO, TTL(1));
+        assert_eq!(TTL_AUTO, Ttl(1));
     }
 
     #[test]
     fn ttl_describe_auto() {
-        assert_eq!(TTL::AUTO.describe(), "auto");
-        assert_eq!(TTL(1).describe(), "auto");
+        assert_eq!(describe_ttl(TTL_AUTO), "auto");
+        assert_eq!(describe_ttl(Ttl(1)), "auto");
     }
 
     #[test]
     fn ttl_describe_seconds() {
-        assert_eq!(TTL(120).describe(), "120s");
-        assert_eq!(TTL(3600).describe(), "3600s");
+        assert_eq!(describe_ttl(Ttl(120)), "120s");
+        assert_eq!(describe_ttl(Ttl(3600)), "3600s");
     }
 
     // -------------------------------------------------------
@@ -1108,7 +1114,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1129,7 +1135,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Noop);
     }
@@ -1157,7 +1163,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1184,7 +1190,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1210,7 +1216,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec![];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1230,7 +1236,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, true, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, true, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1320,7 +1326,7 @@ mod tests {
             .await;
 
         let h = handle(&server.uri());
-        h.final_delete("z1", "a.example.com", "A", &pp()).await;
+        h.final_delete_in_zone("z1", "a.example.com", "A", &pp()).await;
         // Expectations on mocks validate the DELETE calls were made
     }
 
@@ -1525,7 +1531,7 @@ mod tests {
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         // proxied=true but record has proxied=false -> should update
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, true, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, true, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1546,7 +1552,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec!["1.2.3.4".parse().unwrap()];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, true, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, true, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
@@ -1565,7 +1571,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec![];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, false, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, false, &pp())
             .await;
         assert_eq!(result, SetResult::Noop);
     }
@@ -1586,7 +1592,7 @@ mod tests {
         let h = handle(&server.uri());
         let ips: Vec<IpAddr> = vec![];
         let result = h
-            .set_ips("z1", "a.example.com", "A", &ips, false, TTL::AUTO, None, true, &pp())
+            .set_ips_in_zone("z1", "a.example.com", "A", &ips, false, TTL_AUTO, None, true, &pp())
             .await;
         assert_eq!(result, SetResult::Updated);
     }
