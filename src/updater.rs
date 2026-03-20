@@ -1,4 +1,5 @@
-use crate::cloudflare::{CloudflareHandle, SetResult};
+use crate::backend::{DnsBackend, SetResult, Ttl};
+use crate::cloudflare::CloudflareHandle;
 use crate::config::{AppConfig, LegacyCloudflareEntry, LegacySubdomainEntry};
 use crate::domain::make_fqdn;
 use crate::notifier::{CompositeNotifier, Heartbeat, Message};
@@ -10,9 +11,9 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 /// Run a single update cycle.
-pub async fn update_once(
+pub async fn update_once<B: DnsBackend>(
     config: &AppConfig,
-    handle: &CloudflareHandle,
+    handle: &B,
     notifier: &CompositeNotifier,
     heartbeat: &Heartbeat,
     ppfmt: &PP,
@@ -80,22 +81,6 @@ pub async fn update_once(
             let record_type = ip_type.record_type();
 
             for domain_str in domains {
-                // Find zone ID for this domain
-                let zone_id = match handle.zone_id_of_domain(domain_str, ppfmt).await {
-                    Some(id) => id,
-                    None => {
-                        ppfmt.errorf(
-                            pp::EMOJI_ERROR,
-                            &format!("Could not find zone for domain {domain_str}"),
-                        );
-                        all_ok = false;
-                        messages.push(Message::new_fail(&format!(
-                            "Failed to find zone for {domain_str}"
-                        )));
-                        continue;
-                    }
-                };
-
                 let proxied = config
                     .proxied_expression
                     .as_ref()
@@ -104,7 +89,6 @@ pub async fn update_once(
 
                 let result = handle
                     .set_ips(
-                        &zone_id,
                         domain_str,
                         record_type,
                         &ips,
@@ -140,22 +124,6 @@ pub async fn update_once(
             let pve_entries =
                 crate::proxmox::discover_proxmox_domains(pve_config, ppfmt).await;
             for entry in &pve_entries {
-                let zone_id = match handle.zone_id_of_domain(&entry.domain, ppfmt).await {
-                    Some(id) => id,
-                    None => {
-                        ppfmt.errorf(
-                            pp::EMOJI_ERROR,
-                            &format!("Could not find zone for Proxmox domain {}", entry.domain),
-                        );
-                        all_ok = false;
-                        messages.push(Message::new_fail(&format!(
-                            "Failed to find zone for {}",
-                            entry.domain
-                        )));
-                        continue;
-                    }
-                };
-
                 let proxied = config
                     .proxied_expression
                     .as_ref()
@@ -164,7 +132,6 @@ pub async fn update_once(
 
                 let result = handle
                     .set_ips(
-                        &zone_id,
                         &entry.domain,
                         "A",
                         &[entry.ip],
@@ -195,43 +162,6 @@ pub async fn update_once(
             }
         }
 
-        // Update WAF lists
-        for waf_list in &config.waf_lists {
-            // Collect all detected IPs for WAF lists
-            let all_ips: Vec<IpAddr> = detected_ips
-                .values()
-                .flatten()
-                .copied()
-                .collect();
-
-            let result = handle
-                .set_waf_list(
-                    waf_list,
-                    &all_ips,
-                    config.waf_list_item_comment.as_deref(),
-                    config.waf_list_description.as_deref(),
-                    config.dry_run,
-                    ppfmt,
-                )
-                .await;
-
-            match result {
-                SetResult::Updated => {
-                    messages.push(Message::new_ok(&format!(
-                        "Updated WAF list {}",
-                        waf_list.describe()
-                    )));
-                }
-                SetResult::Failed => {
-                    all_ok = false;
-                    messages.push(Message::new_fail(&format!(
-                        "Failed to update WAF list {}",
-                        waf_list.describe()
-                    )));
-                }
-                SetResult::Noop => {}
-            }
-        }
     }
 
     // Send heartbeat
@@ -286,7 +216,7 @@ async fn update_legacy(config: &AppConfig, _ppfmt: &PP) -> bool {
     ddns.update_ips(
         &ips,
         &legacy.cloudflare,
-        legacy.ttl,
+        Ttl(legacy.ttl.max(1) as u32),
         legacy.purge_unknown_records,
     )
     .await;
@@ -295,9 +225,9 @@ async fn update_legacy(config: &AppConfig, _ppfmt: &PP) -> bool {
 }
 
 /// Delete records on stop (for env var mode).
-pub async fn final_delete(
+pub async fn final_delete<B: DnsBackend>(
     config: &AppConfig,
-    handle: &CloudflareHandle,
+    handle: &B,
     notifier: &CompositeNotifier,
     heartbeat: &Heartbeat,
     ppfmt: &PP,
@@ -318,10 +248,8 @@ pub async fn final_delete(
         let record_type = ip_type.record_type();
 
         for domain_str in domains {
-            if let Some(zone_id) = handle.zone_id_of_domain(domain_str, ppfmt).await {
-                handle.final_delete(&zone_id, domain_str, record_type, ppfmt).await;
-                messages.push(Message::new_ok(&format!("Deleted records for {domain_str}")));
-            }
+            handle.final_delete(domain_str, record_type, ppfmt).await;
+            messages.push(Message::new_ok(&format!("Deleted records for {domain_str}")));
         }
     }
 
@@ -330,17 +258,27 @@ pub async fn final_delete(
         let pve_entries =
             crate::proxmox::discover_proxmox_domains(pve_config, ppfmt).await;
         for entry in &pve_entries {
-            if let Some(zone_id) = handle.zone_id_of_domain(&entry.domain, ppfmt).await {
-                handle.final_delete(&zone_id, &entry.domain, "A", ppfmt).await;
-                messages.push(Message::new_ok(&format!(
-                    "Deleted records for {}",
-                    entry.domain
-                )));
-            }
+            handle.final_delete(&entry.domain, "A", ppfmt).await;
+            messages.push(Message::new_ok(&format!(
+                "Deleted records for {}",
+                entry.domain
+            )));
         }
     }
 
-    // Clear WAF lists
+    // Send notifications
+    let msg = Message::merge(messages);
+    heartbeat.exit(&msg).await;
+    notifier.send(&msg).await;
+}
+
+/// Clear WAF lists on stop (Cloudflare-specific).
+pub async fn final_clear_waf_lists(
+    config: &AppConfig,
+    handle: &CloudflareHandle,
+    ppfmt: &PP,
+) -> Vec<Message> {
+    let mut messages = Vec::new();
     for waf_list in &config.waf_lists {
         handle.final_clear_waf_list(waf_list, ppfmt).await;
         messages.push(Message::new_ok(&format!(
@@ -348,11 +286,50 @@ pub async fn final_delete(
             waf_list.describe()
         )));
     }
+    messages
+}
 
-    // Send notifications
-    let msg = Message::merge(messages);
-    heartbeat.exit(&msg).await;
-    notifier.send(&msg).await;
+/// Update WAF lists (Cloudflare-specific).
+pub async fn update_waf_lists(
+    config: &AppConfig,
+    handle: &CloudflareHandle,
+    all_ips: &[IpAddr],
+    ppfmt: &PP,
+) -> (bool, Vec<Message>) {
+    let mut all_ok = true;
+    let mut messages = Vec::new();
+
+    for waf_list in &config.waf_lists {
+        let result = handle
+            .set_waf_list(
+                waf_list,
+                all_ips,
+                config.waf_list_item_comment.as_deref(),
+                config.waf_list_description.as_deref(),
+                config.dry_run,
+                ppfmt,
+            )
+            .await;
+
+        match result {
+            SetResult::Updated => {
+                messages.push(Message::new_ok(&format!(
+                    "Updated WAF list {}",
+                    waf_list.describe()
+                )));
+            }
+            SetResult::Failed => {
+                all_ok = false;
+                messages.push(Message::new_fail(&format!(
+                    "Failed to update WAF list {}",
+                    waf_list.describe()
+                )));
+            }
+            SetResult::Noop => {}
+        }
+    }
+
+    (all_ok, messages)
 }
 
 /// Merge two domain maps, deduplicating entries per IP type.
@@ -606,7 +583,7 @@ impl LegacyDdnsClient {
         &self,
         ips: &HashMap<String, LegacyIpInfo>,
         config: &[LegacyCloudflareEntry],
-        ttl: i64,
+        ttl: Ttl,
         purge_unknown_records: bool,
     ) {
         for ip in ips.values() {
@@ -619,7 +596,7 @@ impl LegacyDdnsClient {
         &self,
         ip: &LegacyIpInfo,
         config: &[LegacyCloudflareEntry],
-        ttl: i64,
+        ttl: Ttl,
         purge_unknown_records: bool,
     ) {
         for entry in config {
@@ -657,7 +634,7 @@ impl LegacyDdnsClient {
                     name: fqdn.clone(),
                     content: ip.ip.clone(),
                     proxied,
-                    ttl,
+                    ttl: ttl.0 as i64,
                 };
 
                 let dns_endpoint = format!(
@@ -743,7 +720,7 @@ impl LegacyDdnsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloudflare::{Auth, CloudflareHandle, TTL, WAFList};
+    use crate::cloudflare::{Auth, CloudflareHandle, WAFList};
     use crate::config::{AppConfig, CronSchedule};
     use crate::notifier::{CompositeNotifier, Heartbeat};
     use crate::pp::PP;
@@ -779,14 +756,15 @@ mod tests {
         dry_run: bool,
     ) -> AppConfig {
         AppConfig {
-            auth: Auth::Token("test-token".to_string()),
+            backend: crate::config::BackendType::Cloudflare,
+            auth: Some(Auth::Token("test-token".to_string())),
             providers,
             domains,
             waf_lists,
             update_cron: CronSchedule::Once,
             update_on_start: true,
             delete_on_stop: false,
-            ttl: TTL::AUTO,
+            ttl: Ttl(1),
             proxied_expression: None,
             record_comment: None,
             managed_comment_regex: None,
@@ -801,6 +779,8 @@ mod tests {
             docker_label_enabled: false,
             docker_socket: None,
             proxmox_config: None,
+            technitium_url: None,
+            technitium_token: None,
             legacy_mode: false,
             legacy_config: None,
             repeat: false,
@@ -1252,25 +1232,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut providers = HashMap::new();
-        providers.insert(
-            IpType::V4,
-            ProviderType::Literal {
-                ips: vec![ip.parse::<IpAddr>().unwrap()],
-            },
-        );
         let waf_list = WAFList {
             account_id: account_id.to_string(),
             list_name: list_name.to_string(),
         };
 
-        let config = make_config(providers, HashMap::new(), vec![waf_list], false);
+        let config = make_config(HashMap::new(), HashMap::new(), vec![waf_list], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
-        let heartbeat = empty_heartbeat();
         let ppfmt = pp();
 
-        let ok = update_once(&config, &cf, &notifier, &heartbeat, &ppfmt).await;
+        let ips: Vec<IpAddr> = vec![ip.parse().unwrap()];
+        let (ok, _msgs) = update_waf_lists(&config, &cf, &ips, &ppfmt).await;
         assert!(!ok, "Expected false when WAF list is not found");
     }
 
@@ -1558,11 +1530,9 @@ mod tests {
 
         let config = make_config(HashMap::new(), HashMap::new(), vec![waf_list], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
-        let heartbeat = empty_heartbeat();
         let ppfmt = pp();
 
-        final_delete(&config, &cf, &notifier, &heartbeat, &ppfmt).await;
+        final_clear_waf_lists(&config, &cf, &ppfmt).await;
     }
 
     /// final_delete with no WAF items does not call DELETE.
@@ -1701,7 +1671,10 @@ mod tests {
         let heartbeat = empty_heartbeat();
         let ppfmt = pp();
 
+        // DNS deletion (generic)
         final_delete(&config, &cf, &notifier, &heartbeat, &ppfmt).await;
+        // WAF cleanup (Cloudflare-specific)
+        final_clear_waf_lists(&config, &cf, &ppfmt).await;
     }
 
     // -------------------------------------------------------
@@ -2120,7 +2093,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, false).await;
+        ddns.commit_record(&ip, &config, Ttl(300), false).await;
     }
 
     #[tokio::test]
@@ -2178,7 +2151,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, false).await;
+        ddns.commit_record(&ip, &config, Ttl(300), false).await;
     }
 
     #[tokio::test]
@@ -2223,7 +2196,7 @@ mod tests {
             proxied: false,
         }];
         // Should not POST
-        ddns.commit_record(&ip, &config, 300, false).await;
+        ddns.commit_record(&ip, &config, Ttl(300), false).await;
     }
 
     #[tokio::test]
@@ -2278,7 +2251,7 @@ mod tests {
             }],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, false).await;
+        ddns.commit_record(&ip, &config, Ttl(300), false).await;
     }
 
     #[tokio::test]
@@ -2332,7 +2305,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, true).await;
+        ddns.commit_record(&ip, &config, Ttl(300), true).await;
     }
 
     #[tokio::test]
@@ -2384,7 +2357,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.update_ips(&ips, &config, 300, false).await;
+        ddns.update_ips(&ips, &config, Ttl(300), false).await;
     }
 
     #[tokio::test]
