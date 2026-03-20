@@ -39,5 +39,6 @@ pub trait DnsBackend {
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Human-readable name for this backend (for logging).
+    #[allow(unused)]
     fn backend_name(&self) -> &str;
 }
