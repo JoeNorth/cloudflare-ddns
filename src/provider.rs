@@ -595,7 +595,6 @@ impl IsGlobal for IpAddr {
 
 fn is_global_v4(ip: &Ipv4Addr) -> bool {
     !ip.is_loopback()
-        && !ip.is_private()
         && !ip.is_link_local()
         && !ip.is_broadcast()
         && !ip.is_unspecified()
@@ -1053,11 +1052,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_detected_ip_rejects_private() {
+    fn test_validate_detected_ip_accepts_private() {
         let ppfmt = PP::default_pp();
-        assert!(!validate_detected_ip(&"10.0.0.1".parse().unwrap(), IpType::V4, &ppfmt));
-        assert!(!validate_detected_ip(&"192.168.1.1".parse().unwrap(), IpType::V4, &ppfmt));
-        assert!(!validate_detected_ip(&"172.16.0.1".parse().unwrap(), IpType::V4, &ppfmt));
+        assert!(validate_detected_ip(&"10.0.0.1".parse().unwrap(), IpType::V4, &ppfmt));
+        assert!(validate_detected_ip(&"192.168.1.1".parse().unwrap(), IpType::V4, &ppfmt));
+        assert!(validate_detected_ip(&"172.16.0.1".parse().unwrap(), IpType::V4, &ppfmt));
     }
 
     #[test]
@@ -1081,7 +1080,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_detect_custom_url_rejects_private_ip() {
+    async fn test_detect_custom_url_accepts_private_ip() {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -1096,7 +1095,7 @@ mod tests {
         let url = format!("{}/my-ip", server.uri());
 
         let result = detect_custom_url(&client, &url, IpType::V4, timeout, &ppfmt).await;
-        assert!(result.is_empty());
+        assert_eq!(result, vec!["10.0.0.1".parse::<IpAddr>().unwrap()]);
     }
 
     // ---- detect_local ----
@@ -1162,9 +1161,9 @@ mod tests {
 
     #[test]
     fn test_is_global_v4_private() {
-        assert!(!is_global_v4(&Ipv4Addr::new(10, 0, 0, 1)));
-        assert!(!is_global_v4(&Ipv4Addr::new(172, 16, 0, 1)));
-        assert!(!is_global_v4(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(is_global_v4(&Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_global_v4(&Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(is_global_v4(&Ipv4Addr::new(192, 168, 1, 1)));
     }
 
     #[test]
